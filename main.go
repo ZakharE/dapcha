@@ -5,14 +5,55 @@ import (
 	"image"
 	"image/color"
 	"image/draw"
-	"image/png"
-	"io/ioutil"
+	"image/gif"
+	"io"
 	"math/rand"
 	"os"
 
 	"github.com/golang/freetype"
 	"github.com/golang/freetype/truetype"
+	"golang.org/x/image/math/fixed"
 )
+
+var (
+	DPI         = 62
+	ImgH        = 200
+	ImgW        = 600
+	FrameNumber = 48
+	FontSizeMax = 64
+	FontSizeMin = 32
+)
+
+var (
+	ColorRed = color.RGBA{
+		R: 0xff,
+		G: 0,
+		B: 0,
+		A: 0xff,
+	}
+	ColorGreen = color.RGBA{
+		R: 0,
+		G: 0xff,
+		B: 0,
+		A: 0xff,
+	}
+	ColorBlue = color.RGBA{
+		R: 0,
+		G: 0,
+		B: 0xff,
+		A: 0xff,
+	}
+)
+
+type Letter struct {
+	letter       rune
+	font         *freetype.Context
+	size         int
+	prevPosition fixed.Point26_6
+	direction    int
+}
+
+type Frame = []*Letter
 
 func main() {
 	f, err := os.Open("font.ttf")
@@ -20,7 +61,7 @@ func main() {
 		panic(err)
 	}
 	defer f.Close()
-	fontBytes, err := ioutil.ReadAll(f)
+	fontBytes, err := io.ReadAll(f)
 	if err != nil {
 		panic(err)
 	}
@@ -31,57 +72,87 @@ func main() {
 	}
 	fmt.Printf("Font %s was loaded\n", font.Name(truetype.NameIDFontFullName))
 
-	rgbaImage := image.NewRGBA(image.Rectangle{
+	// rgbaImage := image.NewRGBA(image.Rectangle{
+	// 	Min: image.Point{0, 0},
+	// 	Max: image.Point{ImgW, ImgH},
+	// })
+	pallete := color.Palette{color.White, color.Black, ColorBlue, ColorRed}
+	baseIMG := image.NewPaletted(image.Rectangle{
 		Min: image.Point{0, 0},
-		Max: image.Point{800, 600},
-	})
+		Max: image.Point{ImgW, ImgH},
+	}, pallete)
 
-	draw.Draw(rgbaImage, rgbaImage.Bounds(), image.White, image.ZP, draw.Src)
+	draw.Draw(baseIMG, baseIMG.Bounds(), image.White, image.Point{}, draw.Src)
 
-	res, err := os.Create("result.png")
-	if err != nil {
-		panic(err)
-	}
+	fmt.Printf("max bound: %d\n", baseIMG.Bounds().Max.Y)
 
 	text := generateCapcha()
-	c := freetype.NewContext()
-	c.SetSrc(image.Black)
-	c.SetFont(font)
-	c.SetDPI(128)
-	c.SetFontSize(20)
-	c.SetClip(rgbaImage.Bounds())
-	c.SetDst(rgbaImage)
-
-	c1 := freetype.NewContext()
-	c1.SetSrc(image.NewUniform(color.RGBA{
-		R: 0xff,
-		G: 0,
-		B: 0,
-		A: 0xff,
-	}))
-	c1.SetFont(font)
-	c1.SetDPI(128)
-	c1.SetFontSize(20)
-	c1.SetClip(rgbaImage.Bounds())
-	c1.SetDst(rgbaImage)
-
-	pt := freetype.Pt(10, int(c.PointToFixed(20)>>6))
-
-	for i, r := range text {
-		if i%2 == 0 {
-			pt, err = c1.DrawString(string(r), pt)
-		} else {
-			pt, err = c.DrawString(string(r), pt)
+	fontContexts := generateRandomFonts(4, font, baseIMG)
+	maxY := baseIMG.Bounds().Max.Y
+	pt := freetype.Pt(0, int(fontContexts[0].PointToFixed(float64(maxY/4))>>6))
+	letters := make([]*Letter, 0, len(text))
+	dir := 1
+	for i := range text {
+		idx := rand.Intn(len(fontContexts))
+		fontCtx := fontContexts[idx]
+		letter := &Letter{
+			letter:       rune(text[i]),
+			font:         fontCtx,
+			prevPosition: pt,
+			direction:    (-1) * dir,
 		}
+		dir *= -1
 
+		letters = append(letters, letter)
+		pt, err = fontCtx.DrawString(string(text[i]), pt)
 		if err != nil {
 			panic(err)
 		}
-		y := rand.Intn(rgbaImage.Bounds().Max.Y)
-		pt.Y = freetype.Pt(0, int(c.PointToFixed(float64(y))>>6)).Y
+		y := FontSizeMin + rand.Intn((maxY/2 - FontSizeMin))
+		pt.Y = fixed.Int26_6(fontCtx.PointToFixed(float64(y)))
 	}
 
-	err = png.Encode(res, rgbaImage)
+	frames := make([]*image.Paletted, 0, FrameNumber)
+	for l := 0; l < FrameNumber; l++ {
+
+		img := image.NewPaletted(image.Rectangle{
+			Min: image.Point{0, 0},
+			Max: image.Point{ImgW, ImgH},
+		}, pallete)
+
+		draw.Draw(img, img.Bounds(), image.White, image.Point{}, draw.Src)
+
+		for i := range letters {
+			letters[i].font.SetDst(img)
+			letters[i].prevPosition.Y += fixed.Int26_6(letters[i].direction) * fixed.Int26_6(letters[i].font.PointToFixed(float64(12)))
+			max := fixed.Int26_6(letters[i].font.PointToFixed(float64(ImgH)))
+			min := fixed.Int26_6(letters[i].font.PointToFixed(float64(FontSizeMax)))
+			clamped, wasClamped := clamp(letters[i].prevPosition.Y, min, max)
+			if wasClamped {
+				letters[i].direction *= -1
+			}
+			letters[i].prevPosition.Y = clamped
+			pt, _ = letters[i].font.DrawString(string(letters[i].letter), letters[i].prevPosition)
+		}
+
+		frames = append(frames, img)
+	}
+
+	f, err = os.Create("dapcha.gif")
+	if err != nil {
+		panic(err)
+	}
+	delays := make([]int, len(frames))
+	for i := range frames {
+		delays[i] = 1
+	}
+	print(len(delays))
+	print(len(frames))
+	g := gif.GIF{
+		Image: frames,
+		Delay: delays,
+	}
+	err = gif.EncodeAll(f, &g)
 	if err != nil {
 		panic(err)
 	}
@@ -89,4 +160,35 @@ func main() {
 
 func generateCapcha() string {
 	return "Hello, World!"
+}
+
+func generateRandomFonts(fontsNumber int, font *truetype.Font, baseIMG *image.Paletted) []*freetype.Context {
+	result := make([]*freetype.Context, 0, fontsNumber)
+	for i := 0; i < fontsNumber; i++ {
+		c := freetype.NewContext()
+		c.SetSrc(image.Black)
+		c.SetFont(font)
+		c.SetDPI(float64(DPI))
+		size := FontSizeMin + rand.Intn(FontSizeMax-FontSizeMin)
+		c.SetFontSize(float64(size))
+		c.SetClip(baseIMG.Bounds())
+		c.SetDst(baseIMG)
+		result = append(result, c)
+	}
+	return result
+}
+
+func clamp(val, min, max fixed.Int26_6) (fixed.Int26_6, bool) {
+	if val < min {
+		return min, true
+	}
+
+	if val > max {
+		return max, true
+	}
+
+	return val, false
+}
+
+func GIFDecode(w io.Writer, frames []*image.RGBA) {
 }
