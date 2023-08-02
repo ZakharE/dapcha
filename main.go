@@ -17,11 +17,11 @@ import (
 
 var (
 	DPI         = 62
-	ImgH        = 200
-	ImgW        = 600
 	FrameNumber = 48
-	FontSizeMax = 64
+	FontSizeMax = 33
 	FontSizeMin = 32
+	ImgH        = 100
+	ImgW        = 180
 )
 
 var (
@@ -144,7 +144,7 @@ func main() {
 	}
 	delays := make([]int, len(frames))
 	for i := range frames {
-		delays[i] = 1
+		delays[i] = 0
 	}
 	print(len(delays))
 	print(len(frames))
